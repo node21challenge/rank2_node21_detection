@@ -1,0 +1,5 @@
+names:
+- nodule
+nc: 1
+train: /home/sentic/Documents/data/storage/Madu_stuff/ALL_CODE/Madu/NODE_DETECTION_YOLO/yamls/train03.txt
+val: /home/sentic/Documents/data/storage/Madu_stuff/ALL_CODE/Madu/NODE_DETECTION_YOLO/yamls/valid0.txt

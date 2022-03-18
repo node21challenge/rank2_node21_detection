@@ -6,12 +6,16 @@ import cv2
 import torch
 import torch.backends.cudnn as cudnn
 import numpy as np
+import yaml
 
 from models.common import DetectMultiBackend
 from utils.datasets import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
 from utils.general import (LOGGER, check_file, check_img_size, check_imshow, check_requirements, colorstr,
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.torch_utils import select_device, time_sync
+import random
+import pandas as pd
+import shutil
 
 @torch.no_grad()
 def load_yolo_predictor(device=0, 
@@ -190,6 +194,187 @@ def optimize_gray_range(hist, bins, min_freq=0.001, null_perc=0.5):
 
     return low_ref, high_ref
 
+def convert_nha_to_png(input_dir, output_dir):
+    for fname in os.listdir(input_dir):
+        mri_file_path = os.path.join(input_dir, fname)
+        if fname.replace(".mha", ".png") not in os.listdir(output_dir):
+            png_file_path = os.path.join(output_dir, fname.replace(".mha", ".png"))
+            image, spacing = convert_file([mri_file_path], png_file_path, auto_contrast=True)
+            sitk.WriteImage(image, png_file_path)
+        
+
+def make_yolo_format_files(input_dir, labels_yolo_dir):
+    metadata_file = os.path.join(input_dir, 'metadata.csv')
+    data = pd.read_csv(metadata_file)
+    images_dir = os.path.join(input_dir, 'images')
+    for fname in os.listdir(images_dir):
+        mha_fname = fname.replace(".png", ".mha")
+        df_in = data[data["img_name"] == mha_fname]
+        rows = []
+        for ix_row, row in df_in.iterrows():
+            if row["label"] != 0:
+                x_min, y_min, w, h = row["x"], row["y"], row["width"], row["height"]
+                x_max, y_max = x_min + w, y_min + h
+                x_c, y_c = (x_min + x_max) / 2, (y_min + y_max) / 2
+                norm_x_c, norm_y_c = x_c / 1024, y_c / 1024
+                norm_w, norm_h = w / 1024, h / 1024
+                text = "0 " + str(norm_x_c) + " " + str(norm_y_c) + " " + str(norm_w) + " " + str(norm_h)
+                rows.append(text)
+        if len(rows) != 0:
+            final_text = "\n".join(rows)
+        else:
+            final_text = ""
+        label_file = os.path.join(labels_yolo_dir, fname.replace(".mha", ".txt"))
+        with open(label_file, "w") as fhandle:
+            fhandle.write(final_text)
+    
+    
+def make_split_v1(input_dir, image_directory, yaml_dir):
+    "It assumes that there are more clean images than images with nodules"
+    percent_nodes = 0.85
+    ratio_clean_nodules = 1.2
+    splits = 3
+    subsplits = 3
+    metadata_file = os.path.join(input_dir, 'metadata.csv')
+    data = pd.read_csv(label_file)
+    groups = data.groupby(by="img_name")
+    nodules = []
+    cleans = []
+    for key, group in groups:
+        if group[group["label"] == 0].shape[0] == 1:
+            cleans.append(key)
+        else:
+            nodules.append(key)
+    nodule_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in nodules]
+    clean_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in cleans]
+    for split_ix in range(splits):
+        nodule_split = [x for x in nodule_paths if random.uniform(0, 1) <= 0.85]
+        length_nodules = len(nodule_split) 
+        clean_split = [x for x in clean_paths if random.uniform(0, 1) <= 0.85] # 1.2 X nodule_numbers
+        length_clean = len(clean_split)
+        should_be_clean_length = len(nodule_split) * ratio_clean_nodules 
+        for subsplit_ix in range(subsplits):
+            clean_subsplit = random.sample(clean_split, should_be_clean_length)
+            txt_filename = "train_V1_" + str(split_ix) + str(subsplit_ix) + ".txt"
+            txt_filename = os.path.join(yaml_dir, txt_filename)
+            text_train = "\n".join(nodule_split + clean_subsplit)
+            with open(txt_filename, "w") as fhandle:
+                fhandle.write(text_train)
+            
+            yaml_filename = os.path.join(yaml_dir, "nodule_V1_" + str(split_ix) + str(subsplit_ix) + ".yaml")
+            data_yaml = dict(
+                train = txt_filename ,
+                val   = txt_filename,
+                nc    = 1,
+                names = ["nodule"]
+                )
+            with open(yaml_filename, 'w') as outfile:
+                yaml.dump(data_yaml, outfile, default_flow_style=False)
+
+def make_split_v2(input_dir, yaml_dir):
+    "It assumes that there are more clean images than images with nodules"
+    percent_nodes = 1.0
+    ratio_clean_nodules = 1.2
+    splits = 3
+    subsplits = 3
+    metadata_file = os.path.join(input_dir, 'metadata.csv')
+    data = pd.read_csv(label_file)
+    groups = data.groupby(by="img_name")
+    nodules = []
+    cleans = []
+    for key, group in groups:
+        if group[group["label"] == 0].shape[0] == 1:
+            cleans.append(key)
+        else:
+            nodules.append(key)
+    nodule_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in nodules]
+    clean_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in cleans]
+    for split_ix in range(splits):
+        nodule_split = [x for x in nodule_paths if random.uniform(0, 1) <= 0.85]
+        length_nodules = len(nodule_split) 
+        clean_split = [x for x in clean_paths if random.uniform(0, 1) <= 0.85] # 1.2 X nodule_numbers
+        length_clean = len(clean_split)
+        should_be_clean_length = len(nodule_split) * ratio_clean_nodules
+        for subsplit_ix in range(subsplits):
+            clean_subsplit = random.sample(clean_split, should_be_clean_length)
+            txt_filename = "train_V1_" + str(split_ix) + str(subsplit_ix) + ".txt"
+            txt_filename = os.path.join(yaml_dir, txt_filename)
+            text_train = "\n".join(nodule_split + clean_subsplit)
+            with open(txt_filename, "w") as fhandle:
+                fhandle.write(text_train)
+            
+            yaml_filename = os.path.join(yaml_dir, "nodule_V1_" + str(split_ix) + str(subsplit_ix) + ".yaml")
+            data_yaml = dict(
+                train = txt_filename ,
+                val   = txt_filename,
+                nc    = 1,
+                names = ["nodule"]
+                )
+            with open(yaml_filename, 'w') as outfile:
+                yaml.dump(data_yaml, outfile, default_flow_style=False)
+        
+def make_split_v3(input_dir, yaml_dir):
+    "It assumes that there are more clean images than images with nodules"
+    percent_nodes = 1.0
+    ratio_clean_nodules = 1.2
+    splits = 3
+    subsplits = 3
+    metadata_file = os.path.join(input_dir, 'metadata.csv')
+    data = pd.read_csv(label_file)
+    groups = data.groupby(by="img_name")
+    nodules = []
+    cleans = []
+    for key, group in groups:
+        if group[group["label"] == 0].shape[0] == 1:
+            cleans.append(key)
+        else:
+            nodules.append(key)
+    nodule_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in nodules]
+    clean_paths = [os.path.join(image_directory, x.replace(".mha", ".png")) for x in cleans]
+    for split_ix in range(splits):
+        nodule_split = [x for x in nodule_paths if random.uniform(0, 1) <= 0.85]
+        length_nodules = len(nodule_split) 
+        clean_split = [x for x in clean_paths if random.uniform(0, 1) <= 0.85] # 1.2 X nodule_numbers
+        length_clean = len(clean_split)
+        should_be_clean_length = len(nodule_split) * ratio_clean_nodules
+        for subsplit_ix in range(subsplits):
+            clean_subsplit = random.sample(clean_split, should_be_clean_length)
+            txt_filename = "train_V1_" + str(split_ix) + str(subsplit_ix) + ".txt"
+            txt_filename = os.path.join(yaml_dir, txt_filename)
+            text_train = "\n".join(nodule_split + clean_subsplit)
+            with open(txt_filename, "w") as fhandle:
+                fhandle.write(text_train)
+            
+            yaml_filename = os.path.join(yaml_dir, "nodule_V1_" + str(split_ix) + str(subsplit_ix) + ".yaml")
+            data_yaml = dict(
+                train = txt_filename ,
+                val   = txt_filename,
+                nc    = 1,
+                names = ["nodule"]
+                )
+            with open(yaml_filename, 'w') as outfile:
+                yaml.dump(data_yaml, outfile, default_flow_style=False)
+    
+def train_competition(yaml_dir):
+    d = {}
+    for ix, yaml_file in enumerate(os.listdir(yaml_dir)):
+        if yaml_file.endswith(".yaml") == False:
+            continue
+        print("Training has started for yaml {}".format(ix))
+        yaml_path =os.path.join(yaml_dir, yaml_file)
+        command = "python3.6 train.py --img 1024 --batch 8 --epochs 30 --data " + str(yaml_path) + " --weights yolov5x.pt --cache"
+        os.system(command)
+        print(command)
+        
+def train_ensemble(yaml_dir):
+    pass
+
+def output_weights(trained_dir, output_dir):
+    for ix, dir_experiment in enumerate(os.listdir(trained_dir)):
+        weights_path = os.path.join(trained_dir, dir_experiment, "weights", "last.pt")
+        new_path = os.path.join(output_dir, "experiment_" + str(ix) + ".pt")
+        shutil.copy(weights_path, new_path)
+        
 import SimpleITK
 import numpy as np
 
@@ -226,7 +411,20 @@ class Noduledetection(DetectionAlgorithm):
         #------------------------------- LOAD the model here ---------------------------------
         self.input_path, self.output_path = input_dir, output_dir
         self.model_paths = ["/opt/algorithm/yolo1.pt", "/opt/algorithm/yolo2.pt", "/opt/algorithm/yolo3.pt", "/opt/algorithm/yolo4.pt", "/opt/algorithm/yolo5.pt", "/opt/algorithm/yolo6.pt", "/opt/algorithm/yolo7.pt", "/opt/algorithm/yolo8.pt", "/opt/algorithm/yolo9.pt", "/opt/algorithm/yolo1-1.pt", "/opt/algorithm/yolo2-1.pt", "/opt/algorithm/yolo3-1.pt", "/opt/algorithm/yolo4-1.pt", "/opt/algorithm/yolo5-1.pt", "/opt/algorithm/yolo6-1.pt", "/opt/algorithm/yolo7-1.pt", "/opt/algorithm/yolo8-1.pt", "/opt/algorithm/yolo9-1.pt", "/opt/algorithm/yolo1-2.pt", "/opt/algorithm/yolo2-2.pt", "/opt/algorithm/yolo3-2.pt", "/opt/algorithm/yolo4-2.pt", "/opt/algorithm/yolo5-2.pt", "/opt/algorithm/yolo6-2.pt", "/opt/algorithm/yolo7-2.pt", "/opt/algorithm/yolo8-2.pt", "/opt/algorithm/yolo9-2.pt", "/opt/algorithm/yolo1f1.pt", "/opt/algorithm/yolo1f2.pt", "/opt/algorithm/yolo2f1.pt", "/opt/algorithm/yolo2f2.pt", "/opt/algorithm/yolo3f1.pt", "/opt/algorithm/yolo3f2.pt",]
+        self.images_dir = "/opt/algorithm/yolo_dataset/images"
+        self.labels_yolo_dir = "/opt/algorithm/yolo_dataset/labels"
+        self.yaml_dir = "/opt/algorithm/yamls"
+        self.trained_models_dir = "/opt/algorithm/runs/train"
         
+        if os.path.isdir(self.images_dir) == False:
+            os.makedirs(self.images_dir)
+            
+        if os.path.isdir(self.labels_yolo_dir) == False:
+            os.makedirs(self.labels_yolo_dir)
+        
+        # add path for yaml and txt files
+        # add path for directory with images (png format) files
+        # add path for directory with labels file
         
         self.model = load_yolo_predictor(data="/opt/algorithm/nodule01.yaml",
                            weights=self.model_paths)
@@ -254,6 +452,18 @@ class Noduledetection(DetectionAlgorithm):
         return scored_candidates
     
     def train(self, num_epochs=1):
+        input_dir = self.input_path
+        mha_dir = os.path.join(self.input_path, "images")
+        images_dir = self.images_dir
+        labels_yolo_dir = self.labels_yolo_dir
+        print("Starting the conversion from mha to png")
+        convert_nha_to_png(mha_dir, images_dir) # done
+        print("Making the annotations dir")
+        make_yolo_format_files(input_dir, labels_yolo_dir) # done
+        #make_split_v1(input_dir)
+        #make_split_v2(input_dir)
+        #make_split_v3(input_dir)
+        train_competition(self.yaml_dir)
         return 0
     
     def format_to_GC(self, np_predictions, spacing):
